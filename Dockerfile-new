@@ -1,0 +1,64 @@
+Dockerfile-newFROM node:18-slim
+
+# Install system dependencies for Puppeteer and FFmpeg
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    procps \
+    libxss1 \
+    ffmpeg \
+    curl \
+    fonts-liberation \
+    libappindicator3-1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcairo-gobject2 \
+    libdrm2 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
+    libxss1 \
+    libgconf-2-4 \
+    && wget --quiet --output-document=- https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /etc/apt/trusted.gpg.d/google-archive.gpg && \
+  sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' && \
+  apt-get update && \
+  apt-get install google-chrome-stable -y --no-install-recommends && \
+  rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+#RUN npm ci --only=production
+
+# Copy source code
+COPY . .
+
+# Create tmp directory for downloads
+RUN mkdir -p /tmp
+
+# Set Puppeteer to use installed Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable \
+    CHROME_BIN=/usr/bin/google-chrome-stable \
+    DISPLAY=:99 \
+    NODE_ENV=production
+
+# Expose port
+EXPOSE 3000
+# Switch to non-root user
+
+# Health check
+
+# Start the application
+CMD ["npm", "start"]
