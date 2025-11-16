@@ -8,6 +8,30 @@ const GeminiService = require('../lib/geminiService');
 const TikTokDownloader = require('../lib/tiktokDownloader');
 const axios = require('axios');
 
+// Instagram CSRF tokens for simulating logged-in user
+const instagramCsrfTokens = [
+  'Xlr1xoC5aViXOOyu8gNCdazYXta7jrPT',
+  's3ZvilLdQFSmR06cSKtAmZ7gzx49FejO'
+];
+
+// Helper function to get random Instagram CSRF token
+const getRandomInstagramToken = () => {
+  const randomIndex = Math.floor(Math.random() * instagramCsrfTokens.length);
+  return instagramCsrfTokens[randomIndex];
+};
+
+// Helper function to set Instagram cookies on page
+const setInstagramCookies = async (page) => {
+  const csrfToken = getRandomInstagramToken();
+  await page.setCookie({
+    name: 'csrftoken',
+    value: csrfToken,
+    domain: '.instagram.com',
+    secure: true,
+    httpOnly: false
+  });
+};
+
 const router = express.Router();
 
 // Function to validate YouTube URLs
@@ -96,29 +120,89 @@ router.get('/video', asyncHandler(async (req, res, next) => {
     return res.status(200).json(cachedResponse);
   }
 
-  // Scrape post webpage
-  let html;
+  // Scrape post webpage with retry logic (including media extraction)
+  let mediaAssets;
   let currentPage;
-  try {
-    const postUrl = `https://www.instagram.com/p/${postId}/`;
-    // Open new browser tab
-    currentPage = await scraper.browser.newPage();
-    // Intercept and block certain resource types for better performance
-    await currentPage.setRequestInterception(true);
-    currentPage.on("request", handleBlockedResources);
-    // Load post page
-    scraper.addActivePost(postId);
-    await currentPage.goto(postUrl, { waitUntil: 'networkidle0' });
-    html = await currentPage.content();
-  } catch (error) {
-    return next(error);
-  } finally {
-    scraper.removeActivePost(postId);
-    await currentPage.close();
-  }
+  const postUrl = `https://www.instagram.com/p/${postId}/`;
+  const maxRetries = 5;
+  let lastError = null;
 
-  // Parse page HTML to get all media assets
-  const mediaAssets = getAllMediaAssets(html, postId);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Instagram fetch attempt ${attempt}/${maxRetries} for post ${postId}`);
+      
+      // Open new browser tab
+      currentPage = await scraper.browser.newPage();
+      
+      // Set Instagram cookies to simulate logged-in user
+      await setInstagramCookies(currentPage);
+      
+      // Intercept and block certain resource types for better performance
+      await currentPage.setRequestInterception(true);
+      currentPage.on("request", handleBlockedResources);
+      
+      // Load post page
+      scraper.addActivePost(postId);
+      await currentPage.goto(postUrl, { 
+        waitUntil: 'networkidle0',
+        timeout: 30000 // 30 second timeout
+      });
+      const html = await currentPage.content();
+      
+      // Try to extract media assets - if this fails, we retry the entire process
+      mediaAssets = getAllMediaAssets(html, postId);
+      
+      // If no media assets found, this means Instagram returned wrong HTML (login page, etc)
+      if (!mediaAssets || mediaAssets.length === 0) {
+        throw new Error('No media assets found in Instagram response - likely got login page or blocked content');
+      }
+      
+      // Success - we got valid media assets, break out of retry loop
+      console.log(`✅ Successfully extracted ${mediaAssets.length} media assets for post ${postId}`);
+      break;
+      
+    } catch (error) {
+      console.error(`Instagram fetch attempt ${attempt} failed:`, error.message);
+      lastError = error;
+      mediaAssets = null; // Reset media assets
+      
+      // Cleanup current page if it exists
+      if (currentPage) {
+        try {
+          await currentPage.close();
+          currentPage = null;
+        } catch (closeError) {
+          console.error('Error closing page after failed attempt:', closeError.message);
+        }
+      }
+      
+      // If not the last attempt, wait before retrying
+      if (attempt < maxRetries) {
+        const waitTime = Math.pow(2, attempt) * 2000; // Exponential backoff: 4s, 8s, 16s, 32s
+        console.log(`Waiting ${waitTime}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    } finally {
+      scraper.removeActivePost(postId);
+    }
+  }
+  
+  // If all attempts failed, return error
+  if (!mediaAssets) {
+    if (currentPage) {
+      await currentPage.close();
+    }
+    return next(lastError || new Error(`Failed to fetch Instagram media after ${maxRetries} attempts`));
+  }
+  
+  // Cleanup page after successful fetch
+  try {
+    if (currentPage) {
+      await currentPage.close();
+    }
+  } catch (closeError) {
+    console.error('Error closing page after successful fetch:', closeError.message);
+  }
   
   // For backward compatibility, we'll return the first video URL if available,
   // otherwise the first image URL
@@ -266,35 +350,90 @@ router.post('/analyze', asyncHandler(async (req, res, next) => {
       });
     }
 
-    // Get all media assets using new scraping logic
-    let html;
+    // Get all media assets using new scraping logic with retry (including media extraction)
+    let mediaAssets;
     let currentPage;
-    try {
-      const postUrl = `https://www.instagram.com/p/${postId}/`;
-      currentPage = await scraper.browser.newPage();
-      await currentPage.setRequestInterception(true);
-      currentPage.on("request", handleBlockedResources);
-      scraper.addActivePost(postId);
-      await currentPage.goto(postUrl, { waitUntil: 'networkidle0' });
-      html = await currentPage.content();
-    } catch (error) {
-      return next(error);
-    } finally {
-      scraper.removeActivePost(postId);
+    const postUrl = `https://www.instagram.com/p/${postId}/`;
+    const maxRetries = 5;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Instagram analyze fetch attempt ${attempt}/${maxRetries} for post ${postId}`);
+        
+        currentPage = await scraper.browser.newPage();
+        
+        // Set Instagram cookies to simulate logged-in user
+        await setInstagramCookies(currentPage);
+        
+        await currentPage.setRequestInterception(true);
+        currentPage.on("request", handleBlockedResources);
+        scraper.addActivePost(postId);
+        await currentPage.goto(postUrl, { 
+          waitUntil: 'networkidle0',
+          timeout: 30000 // 30 second timeout
+        });
+        const html = await currentPage.content();
+        
+        // Try to extract media assets - if this fails, we retry the entire process
+        mediaAssets = getAllMediaAssets(html, postId);
+        
+        // If no media assets found, this means Instagram returned wrong HTML (login page, etc)
+        if (!mediaAssets || mediaAssets.length === 0) {
+          throw new Error('No media assets found in Instagram response - likely got login page or blocked content');
+        }
+        
+        // Success - we got valid media assets, break out of retry loop
+        console.log(`✅ Successfully extracted ${mediaAssets.length} media assets for analyze post ${postId}`);
+        break;
+        
+      } catch (error) {
+        console.error(`Instagram analyze fetch attempt ${attempt} failed:`, error.message);
+        lastError = error;
+        mediaAssets = null; // Reset media assets
+        
+        // Cleanup current page if it exists
+        if (currentPage) {
+          try {
+            await currentPage.close();
+            currentPage = null;
+          } catch (closeError) {
+            console.error('Error closing page after failed attempt:', closeError.message);
+          }
+        }
+        
+        // If not the last attempt, wait before retrying
+        if (attempt < maxRetries) {
+          const waitTime = Math.pow(2, attempt) * 2000; // Exponential backoff: 4s, 8s, 16s, 32s
+          console.log(`Waiting ${waitTime}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      } finally {
+        scraper.removeActivePost(postId);
+      }
+    }
+    
+    // If all attempts failed, return error
+    if (!mediaAssets) {
       if (currentPage) {
         await currentPage.close();
       }
-    }
-
-    // Extract all media assets
-    // console.log(html)
-    const mediaAssets = getAllMediaAssets(html, postId);
-
-    if (!mediaAssets || mediaAssets.length === 0) {
       if (contentId) {
-        sendFailureStatus(contentId, error.message);
+        sendFailureStatus(contentId, lastError?.message || 'Failed to extract media assets');
       }
-      return res.status(404).json({ error: 'No media found in the provided URL' });
+      return res.status(404).json({ 
+        error: 'No media found in the provided URL after multiple attempts',
+        attempts: maxRetries
+      });
+    }
+    
+    // Cleanup page after successful fetch
+    try {
+      if (currentPage) {
+        await currentPage.close();
+      }
+    } catch (closeError) {
+      console.error('Error closing page after successful fetch:', closeError.message);
     }
 
     // Download all media assets
